@@ -152,6 +152,8 @@ static int bochs_check_var(struct fb_var_screeninfo *var,struct fb_info *info) {
 	if (var->yres < 16)
 		var->yres = 480;
 
+	var->xres = (var->xres + 7) & (~7);
+
 	/* FIXME: perhaps it's better not yet to allow
 	 *        userspace to set virtual panning */
 	var->xres_virtual = var->xres;
@@ -170,7 +172,6 @@ static int bochs_check_var(struct fb_var_screeninfo *var,struct fb_info *info) {
 		var->bits_per_pixel = 32;
 
 	bypsl = (var->bits_per_pixel/8) * max(var->xres,var->xres_virtual);
-	bypsl = (bypsl + 7) & (~7);
 	if (bypsl >= 8192) /* safe limit */
 		return -EINVAL;
 	if ((bypsl * var->yres) > apert_usable)
@@ -181,7 +182,8 @@ static int bochs_check_var(struct fb_var_screeninfo *var,struct fb_info *info) {
 	var->vmode = 0;
 
 	if (var->bits_per_pixel <= 16) {
-		if (var->red.offset == 11 || var->red.length == 6) {
+		if (var->red.offset == 11 || var->green.length == 6) {
+			var->red.offset = 11;
 			var->red.length = 5;
 			var->green.offset = 5;
 			var->green.length = 6;
