@@ -180,8 +180,8 @@ static int bochs_check_var(struct fb_var_screeninfo *var,struct fb_info *info) {
 	var->yres_virtual = apert_usable / bypsl;
 	var->vmode = 0;
 
-	if (var->bits_per_pixel == 16) {
-		if (var->red.offset == 11) {
+	if (var->bits_per_pixel <= 16) {
+		if (var->red.offset == 11 || var->red.length == 6) {
 			var->red.length = 5;
 			var->green.offset = 5;
 			var->green.length = 6;
@@ -189,6 +189,7 @@ static int bochs_check_var(struct fb_var_screeninfo *var,struct fb_info *info) {
 			var->blue.length = 5;
 		}
 		else {
+			var->red.offset = 10;
 			var->red.length = 5;
 			var->green.offset = 5;
 			var->green.length = 5;
