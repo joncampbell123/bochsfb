@@ -37,7 +37,7 @@
 
 /* Module description/parameters */
 MODULE_AUTHOR("Jonathan Campbell <jonathan@impactstudiopro.com>");
-MODULE_DESCRIPTION("Framebuffer for Bochs/VirtualBox VBE extensions" BOCHSFB_BUILD_BANNER);
+MODULE_DESCRIPTION("Framebuffer for Bochs/VirtualBox VBE extensions " BOCHSFB_BUILD_BANNER);
 MODULE_LICENSE("GPL");
 
 struct bochs_fb_info {
