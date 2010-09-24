@@ -11,7 +11,7 @@ ifneq ($(KDIR),)
  KDIR=/usr/src/linux
 endif
 
-all: bochsfb.ko
+all: config.h bochsfb.ko
 
 bochsfb.ko: bochsfb.c
 	make -C $(KDIR) M=$(PWD) modules
@@ -21,7 +21,10 @@ install:
 
 clean:
 	make -C $(KDIR) M=$(PWD) clean
-	rm -f modules.order test_info *~ shit glutton info claim
+	rm -f modules.order test_info *~ shit glutton info claim config.h
+
+config.h:
+	./gen-version
 
 load:
 	modprobe fbcon >/dev/null 2>&1 || true

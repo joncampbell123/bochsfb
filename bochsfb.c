@@ -33,10 +33,11 @@
 #endif
 
 #include "bochsfb.h"
+#include "config.h"
 
 /* Module description/parameters */
 MODULE_AUTHOR("Jonathan Campbell <jonathan@impactstudiopro.com>");
-MODULE_DESCRIPTION("Framebuffer for Bochs/VirtualBox VBE extensions");
+MODULE_DESCRIPTION("Framebuffer for Bochs/VirtualBox VBE extensions" BOCHSFB_BUILD_BANNER);
 MODULE_LICENSE("GPL");
 
 struct bochs_fb_info {
@@ -462,7 +463,6 @@ static int __init bochs_init(void)
 		return -ENODEV;
 	}
 
-	printk(KERN_INFO "Alternative minimalist framebuffer for Intel 965/G43 integrated graphics (C) 2010 Jonathan Campbell\n");
 	if (bochs_identify_device()) {
 		printk(KERN_ERR "bochsfb: Found possible Intel device but don't know what it is\n");
 		bochs_free_dev();

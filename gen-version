@@ -16,8 +16,8 @@ fi
 echo This is build "$revision" "$build_date"
 
 cat >config.h <<_EOF
-#define ALTINTEL9XXFB_BUILD_REVISION "$revision"
-#define ALTINTEL9XXFB_BUILD_DATE "$build_date"
-#define ALTINTEL9XXFB_BUILD_BANNER "$revision [$build_date]"
+#define BOCHSFB_BUILD_REVISION "$revision"
+#define BOCHSFB_BUILD_DATE "$build_date"
+#define BOCHSFB_BUILD_BANNER "$revision [$build_date]"
 _EOF
 
