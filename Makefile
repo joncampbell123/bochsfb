@@ -2,10 +2,13 @@ obj-m += bochsfb.o
 
 ifndef $(KDIR)
 KDIR_RAW=$(shell uname -r | sed 's/\-.*$$//')
-KDIR=/usr/src/linux-$(KDIR_RAW)
-#KDIR=/usr/src/linux-2.6.28
-#KDIR=/usr/src/linux-2.6.28.8
-#KDIR=/mnt/sda1/ext2/usr/src/2.6.28.10
+ ifneq ($(KDIR_RAW),)
+  KDIR=/usr/src/linux-$(KDIR_RAW)
+ endif
+endif
+
+ifneq ($(KDIR),)
+ KDIR=/usr/src/linux
 endif
 
 all: bochsfb.ko

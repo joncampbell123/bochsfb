@@ -1,0 +1,10 @@
+#!/bin/bash
+echo Running distclean
+./distclean >/dev/null
+echo Committing the rest
+svn add * */* */*/* */*/*/* */*/*/*/*
+svn commit --message x
+svn update
+svn revert * */* */*/* */*/*/* */*/*/*/*
+exit 0
+

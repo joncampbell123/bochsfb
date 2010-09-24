@@ -1,0 +1,23 @@
+#!/bin/bash
+
+svn_revision=`svn info | grep -i 'Revision: ' | cut -d ' ' -f 2`
+src_ctrl=
+revision=
+build_date=
+
+if test x"$src_ctrl" = "x"; then
+  if test x"$svn_revision" != "x"; then
+    src_ctrl=svn
+    revision="svn-r$svn_revision"
+    build_date=`svn info | grep -i 'Last Changed Date: ' | cut -d ' ' -f 4-`
+  fi
+fi
+
+echo This is build "$revision" "$build_date"
+
+cat >config.h <<_EOF
+#define ALTINTEL9XXFB_BUILD_REVISION "$revision"
+#define ALTINTEL9XXFB_BUILD_DATE "$build_date"
+#define ALTINTEL9XXFB_BUILD_BANNER "$revision [$build_date]"
+_EOF
+
