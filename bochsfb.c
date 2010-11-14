@@ -166,8 +166,10 @@ struct bochs_fb_info {
 };
 
 static unsigned char		vbox_hgsmi = 0,vbox_video = 0;
+static unsigned char		got_apert_region = 0;
 static struct pci_dev*		pci_vga_dev = NULL;
 static resource_size_t		apert_base;
+static unsigned int		apert_mapped;
 static unsigned int		apert_length;
 static unsigned int		apert_usable;
 static unsigned int		monitors = 1;
@@ -214,11 +216,6 @@ static unsigned int bochs_vbe_r(unsigned int index) {
 static void bochs_vbe_w(unsigned int index,unsigned int val) {
 	outw(index,ioport_index);
 	outw(val,ioport_data);
-}
-
-static void bochs_vbe_l(unsigned int index,uint32_t val) {
-	outw(index,ioport_index);
-	outl(val,ioport_data);
 }
 
 static void bochs_unregister_fb(void) {
@@ -367,27 +364,25 @@ static void bochs_unmap_resources(void) {
 	if (aperture_stolen != NULL) {
 		iounmap(aperture_stolen);
 		aperture_stolen = NULL;
-#if 0
 		/* assumption: we wouldn't have ioremap()'d the aperture
 		 * if we were not able to claim it */
-		release_mem_region(apert_base,apert_usable);
-#endif
+		if (got_apert_region) release_mem_region(apert_base,apert_mapped);
+		got_apert_region = 0;
 	}
 }
 
 static int bochs_map_resources(void) {
-#if 0
-	if (!request_mem_region(apert_base,apert_usable,"bochs VBE aperture")) {
+	if (!request_mem_region(apert_base,apert_mapped,"bochs VBE aperture")) {
 		printk(KERN_ERR "bochsfb: cannot claim aperture %llx-%llx\n",
-			apert_base,apert_base+apert_usable-1LL);
+			apert_base,apert_base+apert_mapped-1LL);
 		bochs_unmap_resources();
 		return 1;
 	}
-#endif
+	got_apert_region = 1;
 
 	/* don't ask for the entire aperture, it might be too large for ioremap()
 	 * to handle and there's not that much stolen memory anyhow */
-	if ((aperture_stolen = ioremap(apert_base,apert_usable)) == NULL) {
+	if ((aperture_stolen = ioremap(apert_base,apert_mapped)) == NULL) {
 		bochs_unmap_resources();
 		return 1;
 	}
@@ -422,7 +417,7 @@ static int bochs_setcolreg(unsigned regno,unsigned red,unsigned green,unsigned b
 }
 
 static int bochs_check_var(struct fb_var_screeninfo *var,struct fb_info *info) {
-/*	struct bochs_fb_info *par = info->par; */
+	struct bochs_fb_info *par = info->par;
 	int bypsl;
 
 	if (var->xres < 16)
@@ -452,11 +447,11 @@ static int bochs_check_var(struct fb_var_screeninfo *var,struct fb_info *info) {
 	bypsl = (var->bits_per_pixel/8) * max(var->xres,var->xres_virtual);
 	if (bypsl >= 8192) /* safe limit */
 		return -EINVAL;
-	if ((bypsl * var->yres) > apert_usable)
+	if ((bypsl * var->yres) > par->size)
 		return -EINVAL;
 
 	var->xres_virtual = bypsl / (var->bits_per_pixel/8);
-	var->yres_virtual = apert_usable / bypsl;
+	var->yres_virtual = par->size / bypsl;
 	var->vmode = 0;
 
 	if (var->bits_per_pixel <= 16) {
@@ -629,8 +624,8 @@ static int bochs_register_fb(unsigned int monitor,unsigned long base,unsigned lo
 /*	pci_set_drvdata(pci_vga_dev,f); */
 	f->flags = FBINFO_DEFAULT | FBINFO_HWACCEL_DISABLED;
 	f->fbops = &bochs_ops;
-	f->screen_base = aperture_stolen+base;/*aperture_stolen;*/
-	f->screen_size = size;/*apert_usable;*/
+	f->screen_base = aperture_stolen+base;
+	f->screen_size = size;
 	if (monitors > 1)
 		sprintf(f->fix.id,"BochsVBE/%u",monitor+1);
 	else
@@ -740,6 +735,7 @@ static int __init bochs_identify_device(void) {
 	id = bochs_vbe_r(VBE_DISPI_INDEX_ID);
 	printk(KERN_DEBUG "VBE ID 0x%04X\n",id);
 	vbox_extensions = ((id >= 0xB0C0 && id <= 0xB0C4) || (id >= 0xBE00 && id <= 0xBE02));
+	apert_mapped = apert_usable;
 	monitors = 1;
 
 	/* if this is VirtualBox, then ask how many monitors there are */
@@ -845,14 +841,12 @@ static int __init bochs_init(void)
 		return -ENODEV;
 	}
 
-#if 0
 #ifdef CONFIG_MTRR
 	/* help performance by covering the aperture with
 	 * a write-combining MTRR. it might already be there,
 	 * so the function may fail. if it does, video ram access
 	 * is slightly slower, who cares? */
-	mtrr_add(apert_base,apert_usable,MTRR_TYPE_WRCOMB,1);
-#endif
+	mtrr_add(apert_base,apert_mapped,MTRR_TYPE_WRCOMB,1);
 #endif
 
 	/* VirtualBox has extensions of it's own that enable multiple monitors
