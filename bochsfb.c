@@ -216,6 +216,11 @@ static void bochs_vbe_w(unsigned int index,unsigned int val) {
 	outw(val,ioport_data);
 }
 
+static void bochs_vbe_l(unsigned int index,uint32_t val) {
+	outw(index,ioport_index);
+	outl(val,ioport_data);
+}
+
 static void bochs_unregister_fb(void) {
 	struct fb_info *f;
 	unsigned int head;
@@ -291,7 +296,6 @@ static void vbox_hgsmi_set_info(unsigned int i,unsigned long ofs,unsigned long s
 		barrier();
 		hgsmi_cmd_submit();
 		barrier();
-		printk(KERN_DEBUG "res=%lu\n",(unsigned long)(v->i32Result));
 	}
 	else {
 		printk(KERN_ERR "Failed to alloc HGSMI space for info query\n");
@@ -363,19 +367,23 @@ static void bochs_unmap_resources(void) {
 	if (aperture_stolen != NULL) {
 		iounmap(aperture_stolen);
 		aperture_stolen = NULL;
+#if 0
 		/* assumption: we wouldn't have ioremap()'d the aperture
 		 * if we were not able to claim it */
 		release_mem_region(apert_base,apert_usable);
+#endif
 	}
 }
 
 static int bochs_map_resources(void) {
+#if 0
 	if (!request_mem_region(apert_base,apert_usable,"bochs VBE aperture")) {
 		printk(KERN_ERR "bochsfb: cannot claim aperture %llx-%llx\n",
 			apert_base,apert_base+apert_usable-1LL);
 		bochs_unmap_resources();
 		return 1;
 	}
+#endif
 
 	/* don't ask for the entire aperture, it might be too large for ioremap()
 	 * to handle and there's not that much stolen memory anyhow */
