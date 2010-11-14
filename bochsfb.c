@@ -35,6 +35,33 @@
 #include "bochsfb.h"
 #include "config.h"
 
+typedef struct VBVAFLUSH {
+	uint32_t	u32Reserved;
+} __attribute__((packed)) VBVAFLUSH;
+
+typedef struct VBVAENABLE {
+	uint32_t	u32Flags;
+	uint32_t	u32Offset;
+	int32_t		i32Result;
+} __attribute__((packed)) VBVAENABLE;
+
+typedef struct VBVAINFOVIEW {
+	uint32_t	u32ViewIndex;
+	uint32_t	u32ViewOffset;
+	uint32_t	u32ViewSize;
+	uint32_t	u32MaxScreenSize;
+} __attribute__((packed)) VBVAINFOVIEW;
+
+typedef struct VBVAINFOSCREEN {
+	uint32_t	u32ViewIndex;
+	int32_t		i32OriginX,i32OriginY;
+	uint32_t	u32StartOffset;
+	uint32_t	u32LineSize;
+	uint32_t	u32Width,u32Height;
+	uint16_t	u16BitsPerPixel;
+	uint16_t	u16Flags;
+} __attribute__((packed)) VBVAINFOSCREEN;
+
 typedef struct VBVACONF32 {
     uint32_t	u32Index,u32Value;
 } __attribute__((packed)) VBVACONF32;
@@ -144,9 +171,12 @@ static resource_size_t		apert_base;
 static unsigned int		apert_length;
 static unsigned int		apert_usable;
 static unsigned int		monitors = 1;
+static unsigned int		vbox_hgsmi_heapsize = 0;
 static unsigned int		vbox_extensions = 0;
 static void*			aperture_stolen = NULL;
 static void*			hgsmi_command = NULL;
+static void*			hgsmi_base = NULL;
+static void*			hgsmi_fence = NULL;
 struct fb_info*			bochs_fb[MAX_HEADS];
 int				default_width=640,default_height=480;
 
@@ -197,6 +227,135 @@ static void bochs_unregister_fb(void) {
 			framebuffer_release(f);
 			bochs_fb[head] = NULL;
 		}
+	}
+}
+
+static unsigned int hgsmi_allocd = 0;
+static HGSMIBUFFERHEADER *hgsmi_cmd_begin(size_t cblen,void **data) {
+	HGSMIBUFFERHEADER *h = (HGSMIBUFFERHEADER*)hgsmi_command;
+	if (((char*)hgsmi_command+cblen+sizeof(HGSMIBUFFERHEADER)+sizeof(HGSMIBUFFERTAIL)) >= (char*)hgsmi_fence)
+		return NULL;
+
+	BUG_ON(sizeof(HGSMIBUFFERHEADER) != 16);
+	BUG_ON(sizeof(HGSMIBUFFERTAIL) != 8);
+
+	hgsmi_allocd = (unsigned int)cblen;
+	memset(h,0,sizeof(HGSMIBUFFERHEADER)+cblen+sizeof(HGSMIBUFFERTAIL));
+	*data = (void*)((char*)hgsmi_command+sizeof(HGSMIBUFFERHEADER));
+	h->u32DataSize = cblen;
+	return h;
+}
+
+static void hgsmi_cmd_submit(void) {
+	/* complete tail checksum and submit to H/W */
+	HGSMIBUFFERTAIL *t = (HGSMIBUFFERTAIL*)((char*)hgsmi_command+sizeof(HGSMIBUFFERHEADER)+hgsmi_allocd);
+	t->u32Reserved = 0;
+	t->u32Checksum = HGSMIChecksum(((uint32_t)((char*)hgsmi_command - (char*)aperture_stolen)),(HGSMIBUFFERHEADER*)hgsmi_command,t);
+	outl(((uint32_t)((char*)hgsmi_command - (char*)aperture_stolen)),HGSMI_GUEST);
+	inl(HGSMI_GUEST);
+}
+
+static void vbox_hgsmi_set_info(unsigned int i,unsigned long ofs,unsigned long size) {
+	HGSMIBUFFERHEADER *h;
+	void *dp = NULL;
+
+	h = hgsmi_cmd_begin(sizeof(VBVAINFOVIEW),&dp);
+	if (h) {
+		volatile VBVAINFOVIEW *v = (VBVAINFOVIEW*)dp;
+		BUG_ON(dp == NULL);
+		v->u32ViewIndex = i;
+		v->u32ViewOffset = ofs;
+		v->u32ViewSize = size;
+		v->u32MaxScreenSize = size;
+		h->u8Flags = 0x00;		/* single buffer */
+		h->u8Channel = 0x02;		/* 0x02 = VBVA */
+		h->u16ChannelInfo = 0x03;	/* VBVA_INFO_VIEW */
+		barrier();
+		hgsmi_cmd_submit();
+		barrier();
+	}
+	else {
+		printk(KERN_ERR "Failed to alloc HGSMI space for info query\n");
+	}
+
+	h = hgsmi_cmd_begin(sizeof(VBVAENABLE),&dp);
+	if (h) {
+		volatile VBVAENABLE *v = (VBVAENABLE*)dp;
+		BUG_ON(dp == NULL);
+		v->u32Flags = 8 | 1;		/* enable | absoffset */
+		v->u32Offset = 0;
+		v->i32Result = 111;
+		h->u8Flags = 0x00;		/* single buffer */
+		h->u8Channel = 0x02;		/* 0x02 = VBVA */
+		h->u16ChannelInfo = 0x07;	/* VBVA_ENABLE */
+		barrier();
+		hgsmi_cmd_submit();
+		barrier();
+		printk(KERN_DEBUG "res=%lu\n",(unsigned long)(v->i32Result));
+	}
+	else {
+		printk(KERN_ERR "Failed to alloc HGSMI space for info query\n");
+	}
+
+	h = hgsmi_cmd_begin(sizeof(VBVAFLUSH),&dp);
+	if (h) {
+		volatile VBVAFLUSH *v = (VBVAFLUSH*)dp;
+		BUG_ON(dp == NULL);
+		v->u32Reserved = 0;
+		h->u8Flags = 0x00;		/* single buffer */
+		h->u8Channel = 0x02;		/* 0x02 = VBVA */
+		h->u16ChannelInfo = 0x05;	/* VBVA_FLUSH */
+		barrier();
+		hgsmi_cmd_submit();
+		barrier();
+	}
+	else {
+		printk(KERN_ERR "Failed to alloc HGSMI space for flush\n");
+	}
+}
+
+static uint32_t hgsmi_query_conf32(uint32_t index) {
+	HGSMIBUFFERHEADER *h;
+	void *dp = NULL;
+
+	h = hgsmi_cmd_begin(sizeof(VBVACONF32),&dp);
+	if (h) {
+		volatile VBVACONF32 *v = (VBVACONF32*)dp;
+		BUG_ON(dp == NULL);
+		v->u32Index = index;		/* VBOX_VBVA_CONF32_MONITOR_COUNT */
+		v->u32Value = 0;
+		h->u8Flags = 0x00;		/* single buffer */
+		h->u8Channel = 0x02;		/* 0x02 = VBVA */
+		h->u16ChannelInfo = 0x01;	/* VBVA_QUERY_CONF32 */
+		barrier();
+		hgsmi_cmd_submit();
+		barrier();
+		return v->u32Value;
+	}
+	else {
+		printk(KERN_ERR "Failed to alloc HGSMI space for monitor query\n");
+		return (uint32_t)0xFFFFFFFFUL;
+	}
+}
+
+static void vbox_hgsmi_set_mode(unsigned int i,VBVAINFOSCREEN *si) {
+	HGSMIBUFFERHEADER *h;
+	void *dp = NULL;
+
+	h = hgsmi_cmd_begin(sizeof(VBVAINFOSCREEN),&dp);
+	if (h) {
+		volatile VBVAINFOSCREEN *v = (VBVAINFOSCREEN*)dp;
+		BUG_ON(dp == NULL);
+		*v = *si;
+		h->u8Flags = 0x00;		/* single buffer */
+		h->u8Channel = 0x02;		/* 0x02 = VBVA */
+		h->u16ChannelInfo = 0x06;	/* VBVA_INFO_SCREEN */
+		barrier();
+		hgsmi_cmd_submit();
+		barrier();
+	}
+	else {
+		printk(KERN_ERR "Failed to alloc HGSMI space for modesetting\n");
 	}
 }
 
@@ -338,20 +497,43 @@ static int bochs_check_var(struct fb_var_screeninfo *var,struct fb_info *info) {
 
 static int bochs_set_par(struct fb_info *info) {
 	struct fb_var_screeninfo *var = &info->var;
-/*	struct bochs_fb_info *par = info->par; */
+	struct bochs_fb_info *par = info->par;
 	int bypsl;
 
 	bypsl = var->xres_virtual * (var->bits_per_pixel/8);
 	info->fix.line_length = bypsl;
 
-	bochs_vbe_w(VBE_DISPI_INDEX_XRES,var->xres);
-	bochs_vbe_w(VBE_DISPI_INDEX_YRES,var->yres);
-	if (var->bits_per_pixel == 16 && var->red.offset != 11)
-		bochs_vbe_w(VBE_DISPI_INDEX_BPP,15);
-	else
-		bochs_vbe_w(VBE_DISPI_INDEX_BPP,var->bits_per_pixel);
-	bochs_vbe_w(VBE_DISPI_INDEX_VIRT_WIDTH,var->xres_virtual);
-	bochs_vbe_w(VBE_DISPI_INDEX_ENABLE,VBE_DISPI_ENABLED | VBE_DISPI_LFB_ENABLED | VBE_DISPI_8BIT_DAC);
+	if (par->monitor == 0) {
+		bochs_vbe_w(VBE_DISPI_INDEX_XRES,var->xres);
+		bochs_vbe_w(VBE_DISPI_INDEX_YRES,var->yres);
+		if (var->bits_per_pixel == 16 && var->red.offset != 11)
+			bochs_vbe_w(VBE_DISPI_INDEX_BPP,15);
+		else
+			bochs_vbe_w(VBE_DISPI_INDEX_BPP,var->bits_per_pixel);
+		bochs_vbe_w(VBE_DISPI_INDEX_VIRT_WIDTH,var->xres_virtual);
+		bochs_vbe_w(VBE_DISPI_INDEX_ENABLE,VBE_DISPI_ENABLED | VBE_DISPI_LFB_ENABLED | VBE_DISPI_8BIT_DAC);
+	}
+
+	if (vbox_hgsmi) {
+		VBVAINFOSCREEN s;
+		BUG_ON(par->monitor >= monitors);
+
+		s.u32ViewIndex = par->monitor;
+		s.i32OriginX = 0;
+		s.i32OriginY = 0;
+		s.u32StartOffset = 0;
+		s.u32LineSize = bypsl;
+		s.u32Width = var->xres;
+		s.u32Height = var->yres;
+		s.u16Flags = 1;		/* active */
+		if (var->bits_per_pixel == 16 && var->red.offset != 11)
+			s.u16BitsPerPixel = 15;
+		else
+			s.u16BitsPerPixel = var->bits_per_pixel;
+
+		vbox_hgsmi_set_mode(par->monitor,&s);
+		vbox_hgsmi_set_info(par->monitor,par->base,par->size);
+	}
 
 	return 0;
 }
@@ -440,12 +622,16 @@ static int bochs_register_fb(unsigned int monitor,unsigned long base,unsigned lo
 	pf->hgsmi_page = NULL;
 	BUG_ON(pf == NULL);
 	f->pseudo_palette = pf->pseudo_palette;
-	/*		pci_set_drvdata(pci_vga_dev,f); */
+/*	pci_set_drvdata(pci_vga_dev,f); */
 	f->flags = FBINFO_DEFAULT | FBINFO_HWACCEL_DISABLED;
 	f->fbops = &bochs_ops;
 	f->screen_base = aperture_stolen+base;/*aperture_stolen;*/
 	f->screen_size = size;/*apert_usable;*/
-	strcpy(f->fix.id,"Bochs VBE");
+	if (monitors > 1)
+		sprintf(f->fix.id,"BochsVBE/%u",monitor+1);
+	else
+		strcpy(f->fix.id,"Bochs VBE");
+
 	fill_fb_default_mode(f,i);
 
 	if (fb_alloc_cmap(&f->cmap,256,0) < 0) {
@@ -564,57 +750,6 @@ static int __init bochs_identify_device(void) {
 	return 0;
 }
 
-static unsigned int hgsmi_allocd = 0;
-static HGSMIBUFFERHEADER *hgsmi_cmd_begin(size_t cblen,void **data) {
-	HGSMIBUFFERHEADER *h = (HGSMIBUFFERHEADER*)hgsmi_command;
-	if ((cblen+sizeof(HGSMIBUFFERHEADER)+sizeof(HGSMIBUFFERTAIL)) >= 4096)
-		return NULL;
-
-	hgsmi_allocd = (unsigned int)cblen;
-	memset(h,0,sizeof(HGSMIBUFFERHEADER));
-	*data = (void*)((char*)hgsmi_command+sizeof(HGSMIBUFFERHEADER));
-	h->u32DataSize = 8;
-	return h;
-}
-
-static void hgsmi_cmd_submit(void) {
-	/* complete tail checksum and submit to H/W */
-	HGSMIBUFFERTAIL *t = (HGSMIBUFFERTAIL*)((char*)hgsmi_command+sizeof(HGSMIBUFFERHEADER)+hgsmi_allocd);
-	t->u32Reserved = 0;
-	t->u32Checksum = HGSMIChecksum(((uint32_t)((char*)hgsmi_command - (char*)aperture_stolen)),(HGSMIBUFFERHEADER*)hgsmi_command,t);
-	outl(((uint32_t)((char*)hgsmi_command - (char*)aperture_stolen)),HGSMI_GUEST);
-	inl(HGSMI_GUEST);
-	inl(HGSMI_GUEST);
-	inl(HGSMI_GUEST);
-	inl(HGSMI_GUEST);
-}
-
-static uint32_t hgsmi_query_conf32(uint32_t index) {
-	HGSMIBUFFERHEADER *h;
-	void *dp = NULL;
-
-	h = hgsmi_cmd_begin(8,&dp);
-	if (h) {
-		volatile VBVACONF32 *v = (VBVACONF32*)dp;
-		BUG_ON(dp == NULL);
-		BUG_ON(sizeof(HGSMIBUFFERHEADER) != 16);
-		BUG_ON(sizeof(HGSMIBUFFERTAIL) != 8);
-		v->u32Index = 0;		/* VBOX_VBVA_CONF32_MONITOR_COUNT */
-		v->u32Value = 0;
-		h->u8Flags = 0x00;		/* single buffer */
-		h->u8Channel = 0x02;		/* 0x02 = VBVA */
-		h->u16ChannelInfo = 0x01;	/* VBVA_QUERY_CONF32 */
-		barrier();
-		hgsmi_cmd_submit();
-		barrier();
-		return v->u32Value;
-	}
-	else {
-		printk(KERN_ERR "Failed to alloc HGSMI space for monitor query\n");
-		return (uint32_t)0xFFFFFFFFUL;
-	}
-}
-
 /* NTS: assume caller already checked vbox_hgsmi */
 /* NTS: VirtualBox code suggests that the command buffer must reside in
  *      VGA video RAM even though we give the host a raw physical memory
@@ -628,12 +763,32 @@ static int check_hgsmi(void) {
 		return 1;
 
 	apert_usable -= 4096;
-	hgsmi_command = (void*)((char*)aperture_stolen + apert_usable);
+	hgsmi_command = hgsmi_base = (void*)((char*)aperture_stolen + apert_usable);
+	hgsmi_fence = (void*)((char*)hgsmi_base + 4096);
 	printk(KERN_DEBUG "Allocating 4KB for HGSMI command buffer\n");
 
 	/* how many monitors? */
 	v32 = hgsmi_query_conf32(0);		/* VBOX_VBVA_CONF32_MONITOR_COUNT */
-	printk(KERN_INFO "%u monitors\n",v32);
+	if (v32 != 0) v32 = hgsmi_query_conf32(0);
+	if (v32 > 0 && v32 <= MAX_HEADS) {
+		printk(KERN_INFO "bochsfb: VirtualBox %u monitors present\n",v32);
+		monitors = (int)v32;
+	}
+	else {
+		printk(KERN_ERR "bochsfb: Invalid monitor count\n");
+	}
+
+	/* heap size? */
+	v32 = hgsmi_query_conf32(1);		/* VBOX_VBVA_CONF32_HOST_HEAP_SIZE */
+	if (v32 != 0 && v32 != ~0U) {
+		vbox_hgsmi_heapsize = (unsigned int)v32;
+		printk(KERN_INFO "bochsfb: HGSMI heapsize %u\n",vbox_hgsmi_heapsize);
+	}
+	else {
+		printk(KERN_ERR "bochsfb: Host failed to properly return heap size\n");
+		return 1;
+	}
+
 	return 0;
 }
 
@@ -700,7 +855,7 @@ static int __init bochs_init(void)
 	 * and a memory-based command/response system */
 	if (vbox_extensions) {
 		if (vbox_hgsmi) {
-			if (!check_hgsmi()) {
+			if (check_hgsmi()) {
 				printk(KERN_WARNING "bochsfb: HGSMI functionality disabled\n");
 				vbox_hgsmi = 0;
 			}
@@ -716,9 +871,17 @@ static int __init bochs_init(void)
 			return -ENOMEM;
 		}
 	}
-	else {
-		/* FIXME */
-		monitors = 0;
+	else if (monitors > 1) {
+		unsigned long per_fb_size = (apert_usable / monitors) & (~0xFFF);
+		unsigned int i;
+		printk(KERN_ERR "bochsfb: setting up %u-head output (%lu bytes/monitor)\n",monitors,per_fb_size);
+		for (i=0;i < monitors;i++) {
+			if (bochs_register_fb(i,i*per_fb_size,per_fb_size)) {
+				printk(KERN_ERR "Problem registering framebuffer %d\n",i);
+				bochs_free_dev();
+				return -ENOMEM;
+			}
+		}
 	}
 
 	return 0;
