@@ -363,23 +363,19 @@ static void bochs_unmap_resources(void) {
 	if (aperture_stolen != NULL) {
 		iounmap(aperture_stolen);
 		aperture_stolen = NULL;
-#if 0
 		/* assumption: we wouldn't have ioremap()'d the aperture
 		 * if we were not able to claim it */
 		release_mem_region(apert_base,apert_usable);
-#endif
 	}
 }
 
 static int bochs_map_resources(void) {
-#if 0
 	if (!request_mem_region(apert_base,apert_usable,"bochs VBE aperture")) {
 		printk(KERN_ERR "bochsfb: cannot claim aperture %llx-%llx\n",
 			apert_base,apert_base+apert_usable-1LL);
 		bochs_unmap_resources();
 		return 1;
 	}
-#endif
 
 	/* don't ask for the entire aperture, it might be too large for ioremap()
 	 * to handle and there's not that much stolen memory anyhow */
@@ -565,7 +561,7 @@ static void fill_fb_default_mode(struct fb_info *fb,const int index) {
 
 	/* caller already took care of the id field */
 	f->smem_start = apert_base+par->base;
-	f->smem_len = apert_usable;
+	f->smem_len = par->size;
 	f->type = FB_TYPE_PACKED_PIXELS;
 	f->visual = FB_VISUAL_TRUECOLOR;
 	f->xpanstep = 1;
