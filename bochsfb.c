@@ -35,6 +35,12 @@
 #include "bochsfb.h"
 #include "config.h"
 
+/* DEBUG: If #define'd, the 4K VBVA is exposed at the end of the fb device's
+ *        map. Else, it is mapped out (for obvious safety reasons) */
+//#define EXPOSE_VBVA
+
+#define VBVA_MAX_RECORDS	(64)
+
 typedef struct VBVAFLUSH {
 	uint32_t	u32Reserved;
 } __attribute__((packed)) VBVAFLUSH;
@@ -44,6 +50,11 @@ typedef struct VBVAENABLE {
 	uint32_t	u32Offset;
 	int32_t		i32Result;
 } __attribute__((packed)) VBVAENABLE;
+
+typedef struct VBVAENABLE_EX {
+	VBVAENABLE	Base;
+	uint32_t	u32ScreenId;
+} __attribute__((packed)) VBVAENABLE_EX;
 
 typedef struct VBVAINFOVIEW {
 	uint32_t	u32ViewIndex;
@@ -63,8 +74,34 @@ typedef struct VBVAINFOSCREEN {
 } __attribute__((packed)) VBVAINFOSCREEN;
 
 typedef struct VBVACONF32 {
-    uint32_t	u32Index,u32Value;
+    uint32_t		u32Index,u32Value;
 } __attribute__((packed)) VBVACONF32;
+
+typedef struct VBVARECORD {
+    uint32_t		cbRecord;
+} __attribute__((packed)) VBVARECORD;
+
+typedef struct VBVAHOSTFLAGS {
+    uint32_t		u32HostEvents;
+    uint32_t		u32SupportedOrders;
+} __attribute__((packed)) VBVAHOSTFLAGS;
+
+typedef struct VBVABUFFER {
+    VBVAHOSTFLAGS	hostFlags;
+    uint32_t		off32Data;
+    uint32_t		off32Free;
+    VBVARECORD		aRecords[VBVA_MAX_RECORDS];
+    uint32_t		indexRecordFirst;
+    uint32_t		indexRecordFree;
+    uint32_t		cbPartialWriteThreshold;
+    uint32_t		cbData;
+    uint8_t		au8Data[1];
+} __attribute__((packed)) VBVABUFFER;
+
+typedef struct VBVACMDHDR {
+    int16_t		x,y;
+    uint16_t		w,h;
+} __attribute__((packed)) VBVACMDHDR;
 
 typedef struct _HGSMIBUFFERHEADER
 {
@@ -218,20 +255,6 @@ static void bochs_vbe_w(unsigned int index,unsigned int val) {
 	outw(val,ioport_data);
 }
 
-static void bochs_unregister_fb(void) {
-	struct fb_info *f;
-	unsigned int head;
-
-	for (head=0;head < monitors;head++) {
-		if ((f = bochs_fb[head]) != NULL) {
-			unregister_framebuffer(f);	/* the code will not leave it in if it didn't succeed */
-			fb_dealloc_cmap(&f->cmap);
-			framebuffer_release(f);
-			bochs_fb[head] = NULL;
-		}
-	}
-}
-
 static unsigned int hgsmi_allocd = 0;
 static HGSMIBUFFERHEADER *hgsmi_cmd_begin(size_t cblen,void **data) {
 	HGSMIBUFFERHEADER *h = (HGSMIBUFFERHEADER*)hgsmi_command;
@@ -257,6 +280,61 @@ static void hgsmi_cmd_submit(void) {
 	inl(HGSMI_GUEST);
 }
 
+static void bochs_unregister_fb(void) {
+	HGSMIBUFFERHEADER *h;
+	struct fb_info *f;
+	unsigned int head;
+	void *dp = NULL;
+
+	for (head=0;head < monitors;head++) {
+		if ((f = bochs_fb[head]) != NULL) {
+			/* disable VBVA */
+			{
+				h = hgsmi_cmd_begin(sizeof(VBVAFLUSH),&dp);
+				if (h) {
+					volatile VBVAFLUSH *v = (VBVAFLUSH*)dp;
+					BUG_ON(dp == NULL);
+					v->u32Reserved = 0;
+					h->u8Flags = 0x00;		/* single buffer */
+					h->u8Channel = 0x02;		/* 0x02 = VBVA */
+					h->u16ChannelInfo = 0x05;	/* VBVA_FLUSH */
+					barrier();
+					hgsmi_cmd_submit();
+					barrier();
+				}
+				else {
+					printk(KERN_ERR "Failed to alloc HGSMI space for flush\n");
+				}
+
+				h = hgsmi_cmd_begin(sizeof(VBVAENABLE_EX),&dp);
+				if (h) {
+					volatile VBVAENABLE_EX *v = (VBVAENABLE_EX*)dp;
+					BUG_ON(dp == NULL);
+
+					v->Base.u32Flags = 8 | 4 | 2;	/* abs | ext | disable */
+					v->Base.u32Offset = 0;
+					v->Base.i32Result = 111;
+					v->u32ScreenId = head;
+					h->u8Flags = 0x00;		/* single buffer */
+					h->u8Channel = 0x02;		/* 0x02 = VBVA */
+					h->u16ChannelInfo = 0x07;	/* VBVA_ENABLE */
+					barrier();
+					hgsmi_cmd_submit();
+					barrier();
+				}
+				else {
+					printk(KERN_ERR "Failed to alloc HGSMI space for info query\n");
+				}
+			}
+
+			unregister_framebuffer(f);	/* the code will not leave it in if it didn't succeed */
+			fb_dealloc_cmap(&f->cmap);
+			framebuffer_release(f);
+			bochs_fb[head] = NULL;
+		}
+	}
+}
+
 static void vbox_hgsmi_set_info(unsigned int i,unsigned long ofs,unsigned long size) {
 	HGSMIBUFFERHEADER *h;
 	void *dp = NULL;
@@ -280,13 +358,39 @@ static void vbox_hgsmi_set_info(unsigned int i,unsigned long ofs,unsigned long s
 		printk(KERN_ERR "Failed to alloc HGSMI space for info query\n");
 	}
 
-	h = hgsmi_cmd_begin(sizeof(VBVAENABLE),&dp);
+	/* NTS: We VBVA_ENABLE all monitors except #0, which we disable.
+	 *      The reason we do that is that, once VBVA is enabled,
+	 *      VirtualBox stops updating from the framebuffer except when
+	 *      explicitly told to update. Since the Linux kernel knows
+	 *      nothing of the flushing commands nor do most users of fbdev,
+	 *      this results in a "frozen screen" which is a bad thing
+	 *      when that screen is your framebuffer console. */
+	h = hgsmi_cmd_begin(sizeof(VBVAENABLE_EX),&dp);
 	if (h) {
-		volatile VBVAENABLE *v = (VBVAENABLE*)dp;
+		volatile VBVAENABLE_EX *v = (VBVAENABLE_EX*)dp;
+		volatile VBVABUFFER *vb;
 		BUG_ON(dp == NULL);
-		v->u32Flags = 8 | 1;		/* enable | absoffset */
-		v->u32Offset = 0;
-		v->i32Result = 111;
+
+		if (i == 0)
+			v->Base.u32Flags = 8 | 4 | 2;	/* abs | ext | disable */
+		else
+			v->Base.u32Flags = 8 | 4 | 1;	/* abs | ext | enable */
+
+#ifdef EXPOSE_VBVA
+		printk(KERN_WARNING "Warning: EXPOSE_VBVA dictates I expose the VBVA to userspace\n");
+		v->Base.u32Offset = ofs + size - 0x1000;
+#else
+		v->Base.u32Offset = ofs + size;
+#endif
+		/* clear the VBVA */
+		vb = (VBVABUFFER*)(aperture_stolen+v->Base.u32Offset);
+		memset((unsigned char*)vb,0,0x1000);
+		vb->cbData = 4096 - sizeof(VBVABUFFER);
+		/* DEBUG */
+		memcpy(aperture_stolen+v->Base.u32Offset+0x1000-5,"Hello",5);
+
+		v->Base.i32Result = 111;
+		v->u32ScreenId = i;
 		h->u8Flags = 0x00;		/* single buffer */
 		h->u8Channel = 0x02;		/* 0x02 = VBVA */
 		h->u16ChannelInfo = 0x07;	/* VBVA_ENABLE */
@@ -540,14 +644,42 @@ static int bochs_set_par(struct fb_info *info) {
 static int bochs_ioctl(struct fb_info *info, unsigned int cmd, unsigned long arg)
 {
 	struct bochs_fb_info *par = info->par;
+	volatile VBVABUFFER *vb;
 	HGSMIBUFFERHEADER *h;
 	int err = -EINVAL;
 	void *dp = NULL;
 
 	if (cmd == BOCHSFB_FLUSH) {
 		if (vbox_hgsmi && par->monitor != 0) {
+			volatile VBVACMDHDR *hdr;
+			volatile VBVARECORD *rec;
+
+#ifdef EXPOSE_VBVA
+			vb = (VBVABUFFER*)(aperture_stolen+par->base+
+				par->size-0x1000);
+#else
+			vb = (VBVABUFFER*)(aperture_stolen+par->base+par->size);
+#endif
+			vb->off32Data = vb->off32Free = 0;
+			vb->indexRecordFirst = vb->indexRecordFree = 0;
+
+			/* make up a single rect */
+			hdr = (VBVACMDHDR*)(vb->au8Data+vb->off32Free);
+			hdr->x = 16;
+			hdr->y = 16;
+			hdr->w = 16;
+			hdr->h = 16;
+
+			/* make up a single record */
+			rec = &(vb->aRecords[vb->indexRecordFree]);
+			rec->cbRecord = sizeof(VBVACMDHDR);
+
+			/* apply the record */
+			vb->indexRecordFree++;
+			vb->off32Free += rec->cbRecord;
+
 			h = hgsmi_cmd_begin(sizeof(VBVAFLUSH),&dp);
-			if (h) { /* FIXME This isn't working */
+			if (h) {
 				volatile VBVAFLUSH *v = (VBVAFLUSH*)dp;
 				BUG_ON(dp == NULL);
 				v->u32Reserved = 0;
@@ -898,10 +1030,17 @@ static int __init bochs_init(void)
 	}
 	else if (monitors > 1) {
 		unsigned long per_fb_size = (apert_usable / monitors) & (~0xFFF);
+		unsigned long per_fb_alloc = per_fb_size;
 		unsigned int i;
+
+#ifndef EXPOSE_VBVA
+		/* make room for a VBVA buffer */
+		if (vbox_hgsmi && per_fb_alloc >= 0x2000) per_fb_alloc -= 0x1000;
+#endif
+
 		printk(KERN_ERR "bochsfb: setting up %u-head output (%lu bytes/monitor)\n",monitors,per_fb_size);
 		for (i=0;i < monitors;i++) {
-			if (bochs_register_fb(i,i*per_fb_size,per_fb_size)) {
+			if (bochs_register_fb(i,i*per_fb_size,per_fb_alloc)) {
 				printk(KERN_ERR "Problem registering framebuffer %d\n",i);
 				bochs_free_dev();
 				return -ENOMEM;
