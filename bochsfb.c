@@ -641,67 +641,82 @@ static int bochs_set_par(struct fb_info *info) {
 	return 0;
 }
 
-static int bochs_ioctl(struct fb_info *info, unsigned int cmd, unsigned long arg)
-{
+static int hgsmi_flush_rect(struct fb_info *info,unsigned int x,unsigned int y,unsigned int w,unsigned int h) {
 	struct bochs_fb_info *par = info->par;
 	volatile VBVABUFFER *vb;
-	HGSMIBUFFERHEADER *h;
+	HGSMIBUFFERHEADER *hdr;
 	int err = -EINVAL;
 	void *dp = NULL;
 
-	if (cmd == BOCHSFB_FLUSH) {
-		if (vbox_hgsmi && par->monitor != 0) {
-			volatile VBVACMDHDR *hdr;
-			volatile VBVARECORD *rec;
+	if (vbox_hgsmi && par->monitor != 0) {
+		volatile VBVACMDHDR *chdr;
+		volatile VBVARECORD *rec;
 
 #ifdef EXPOSE_VBVA
-			vb = (VBVABUFFER*)(aperture_stolen+par->base+
-				par->size-0x1000);
+		vb = (VBVABUFFER*)(aperture_stolen+par->base+
+			par->size-0x1000);
 #else
-			vb = (VBVABUFFER*)(aperture_stolen+par->base+par->size);
+		vb = (VBVABUFFER*)(aperture_stolen+par->base+par->size);
 #endif
-			/* keep it simple: always reset the offset/record
-			 * pointers to zero so we never have to worry about
-			 * partial records. */
-			vb->off32Data = vb->off32Free = 0;
-			vb->indexRecordFirst = vb->indexRecordFree = 0;
+		/* keep it simple: always reset the offset/record
+		 * pointers to zero so we never have to worry about
+		 * partial records. */
+		vb->off32Data = vb->off32Free = 0;
+		vb->indexRecordFirst = vb->indexRecordFree = 0;
 
-			/* make up a single rect */
-			hdr = (VBVACMDHDR*)(vb->au8Data+vb->off32Free);
-			hdr->x = 0;
-			hdr->y = 0;
-			hdr->w = info->var.xres;
-			hdr->h = info->var.yres;
+		/* make up a single rect */
+		chdr = (VBVACMDHDR*)(vb->au8Data+vb->off32Free);
+		chdr->x = x;
+		chdr->y = y;
+		chdr->w = w;
+		chdr->h = h;
 
-			/* make up a single record */
-			rec = &(vb->aRecords[vb->indexRecordFree]);
-			rec->cbRecord = sizeof(VBVACMDHDR);
+		/* make up a single record */
+		rec = &(vb->aRecords[vb->indexRecordFree]);
+		rec->cbRecord = sizeof(VBVACMDHDR);
 
-			/* apply the record */
-			vb->indexRecordFree++;
-			vb->off32Free += rec->cbRecord;
+		/* apply the record */
+		vb->indexRecordFree++;
+		vb->off32Free += rec->cbRecord;
 
-			h = hgsmi_cmd_begin(sizeof(VBVAFLUSH),&dp);
-			if (h) {
-				volatile VBVAFLUSH *v = (VBVAFLUSH*)dp;
-				BUG_ON(dp == NULL);
-				v->u32Reserved = 0;
-				h->u8Flags = 0x00;		/* single buffer */
-				h->u8Channel = 0x02;		/* 0x02 = VBVA */
-				h->u16ChannelInfo = 0x05;	/* VBVA_FLUSH */
-				barrier();
-				hgsmi_cmd_submit();
-				barrier();
-				err = 0;
-			}
-			else {
-				printk(KERN_ERR "Failed to alloc HGSMI space for flush\n");
-				err = -ENOMEM;
-			}
+		hdr = hgsmi_cmd_begin(sizeof(VBVAFLUSH),&dp);
+		if (hdr) {
+			volatile VBVAFLUSH *v = (VBVAFLUSH*)dp;
+			BUG_ON(dp == NULL);
+			v->u32Reserved = 0;
+			hdr->u8Flags = 0x00;		/* single buffer */
+			hdr->u8Channel = 0x02;		/* 0x02 = VBVA */
+			hdr->u16ChannelInfo = 0x05;	/* VBVA_FLUSH */
+			barrier();
+			hgsmi_cmd_submit();
+			barrier();
+			err = 0;
 		}
 		else {
-			err = 1; /* not effective */
+			printk(KERN_ERR "Failed to alloc HGSMI space for flush\n");
+			err = -ENOMEM;
 		}
+	}
+	else {
+		err = 1; /* not effective */
+	}
+
+	return err;
+}
+
+static int bochs_ioctl(struct fb_info *info, unsigned int cmd, unsigned long arg)
+{
+	int err = -EINVAL;
+
+	if (cmd == BOCHSFB_FLUSH)
+		err = hgsmi_flush_rect(info,0,0,info->var.xres,info->var.yres);
+	else if (cmd == BOCHSFB_FLUSH_RECT) {
+		struct bochsfb_rect r;
+
+		if (copy_from_user(&r,(const void __user*)arg,sizeof(r)))
+			return -EINVAL;
+
+		err = hgsmi_flush_rect(info,r.x,r.y,r.w,r.h);
 	}
 
 	return err;
