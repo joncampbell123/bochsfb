@@ -21,10 +21,14 @@ bochsfb.ko: bochsfb.c
 
 install:
 	make -C $(KDIR) M=$(PWD) modules_install
+	mkdir -p $(DESTDIR)/usr/bin/
+	cp -v bochsfb_flush $(DESTDIR)/usr/bin/
+	mkdir -p $(DESTDIR)/usr/include/
+	cp -v bochsfb.h $(DESTDIR)/usr/include/
 
 clean:
 	make -C $(KDIR) M=$(PWD) clean
-	rm -f modules.order test_info *~ shit glutton info claim config.h
+	rm -f modules.order test_info *~ shit glutton info claim config.h bochsfb_flush
 
 config.h:
 	./gen-version

@@ -952,7 +952,7 @@ static int check_hgsmi(void) {
 		monitors = (int)v32;
 	}
 	else {
-		printk(KERN_ERR "bochsfb: Invalid monitor count\n");
+		printk(KERN_ERR "bochsfb: Invalid monitor count (%u)\n",v32);
 	}
 
 	/* heap size? */
@@ -962,7 +962,7 @@ static int check_hgsmi(void) {
 		printk(KERN_INFO "bochsfb: HGSMI heapsize %u\n",vbox_hgsmi_heapsize);
 	}
 	else {
-		printk(KERN_ERR "bochsfb: Host failed to properly return heap size\n");
+		printk(KERN_ERR "bochsfb: Host failed to properly return heap size (%u)\n",v32);
 		return 1;
 	}
 
