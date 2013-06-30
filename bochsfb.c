@@ -660,15 +660,18 @@ static int bochs_ioctl(struct fb_info *info, unsigned int cmd, unsigned long arg
 #else
 			vb = (VBVABUFFER*)(aperture_stolen+par->base+par->size);
 #endif
+			/* keep it simple: always reset the offset/record
+			 * pointers to zero so we never have to worry about
+			 * partial records. */
 			vb->off32Data = vb->off32Free = 0;
 			vb->indexRecordFirst = vb->indexRecordFree = 0;
 
 			/* make up a single rect */
 			hdr = (VBVACMDHDR*)(vb->au8Data+vb->off32Free);
-			hdr->x = 16;
-			hdr->y = 16;
-			hdr->w = 16;
-			hdr->h = 16;
+			hdr->x = 0;
+			hdr->y = 0;
+			hdr->w = info->var.xres;
+			hdr->h = info->var.yres;
 
 			/* make up a single record */
 			rec = &(vb->aRecords[vb->indexRecordFree]);
