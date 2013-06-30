@@ -11,7 +11,10 @@ ifneq ($(KDIR),)
  KDIR=/usr/src/linux
 endif
 
-all: config.h bochsfb.ko
+all: config.h bochsfb.ko bochsfb_flush
+
+bochsfb_flush: bochsfb_flush.c
+	gcc -o $@ $<
 
 bochsfb.ko: bochsfb.c
 	make -C $(KDIR) M=$(PWD) modules

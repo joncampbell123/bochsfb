@@ -539,8 +539,35 @@ static int bochs_set_par(struct fb_info *info) {
 
 static int bochs_ioctl(struct fb_info *info, unsigned int cmd, unsigned long arg)
 {
-/*	struct bochs_fb_info *par = info->par; */
+	struct bochs_fb_info *par = info->par;
+	HGSMIBUFFERHEADER *h;
 	int err = -EINVAL;
+	void *dp = NULL;
+
+	if (cmd == BOCHSFB_FLUSH) {
+		if (vbox_hgsmi && par->monitor != 0) {
+			h = hgsmi_cmd_begin(sizeof(VBVAFLUSH),&dp);
+			if (h) { /* FIXME This isn't working */
+				volatile VBVAFLUSH *v = (VBVAFLUSH*)dp;
+				BUG_ON(dp == NULL);
+				v->u32Reserved = 0;
+				h->u8Flags = 0x00;		/* single buffer */
+				h->u8Channel = 0x02;		/* 0x02 = VBVA */
+				h->u16ChannelInfo = 0x05;	/* VBVA_FLUSH */
+				barrier();
+				hgsmi_cmd_submit();
+				barrier();
+				err = 0;
+			}
+			else {
+				printk(KERN_ERR "Failed to alloc HGSMI space for flush\n");
+				err = -ENOMEM;
+			}
+		}
+		else {
+			err = 1; /* not effective */
+		}
+	}
 
 	return err;
 }

@@ -6,7 +6,9 @@
 #endif
 
 /* IOCTLs specific to this driver */
-#define BOCHSFB_DUMMY		_IOW('B', 1, unsigned int)
+
+/* Virtualbox requires a FLUSH command on secondary displays */
+#define BOCHSFB_FLUSH		_IO('B', 1)
 
 #endif
 
