@@ -1,0 +1,80 @@
+
+bochsfb - A General Driver for Bochs VBE and VirtualBox-based VMs
+========================================================================
+
+1. Requirements
+---------------
+
+bochsfb has been extensively tested against VirtualBox OSE 4.0 and higher.
+It will use the base VBE extensions offered by Bochs to allow modesetting,
+and make use of VirtualBox's OMAPI extensions if available.
+
+The latest source code is available at:
+
+http://hackipedia.org/Projects/bochsfb/
+
+For best results make sure you have enough (emulated) video RAM for the
+modes you want to use. For multi-monitor support, it is recommended that
+you assign a minimum of 32MB of video RAM for two, plus 16MB for each
+additional monitor, to the virtual machine.
+
+2. Caveats and limitations
+--------------------------
+
+- Should work with the Bochs emulator (in VBE vga mode), but not
+  extensively tested yet.
+
+- Supports VirtualBox's multi-monitor emulation by registering multiple
+  framebuffer devices, but writes to the framebuffer device are not
+  visible until you use a special ioctl() to trigger a screen update.
+  This is a limitation of VirtualBox, not this driver.
+
+- Does not use or attempt to use 2D or 3D acceleration offered by VirtualBox.
+
+- Not usable in emulators that do not emulate VBE extensions, such as QEMU.
+
+3. Configuration
+----------------
+
+bochsfb is a kernel module that you load at boot time when needed. It is not
+yet a driver that you can compile into the kernel.
+
+If you are running Linux kernel 3.10.x or higher and your VGA device is
+currently taken by a general firmware device such as efifb, loading bochsfb
+in VirtualBox will kick the generic driver aside automatically.
+
+Once loaded, you can use the `fbset' utility to change video resolution and
+bit depth. Under Bochs and VirtualBox you can set 8/15/16/24/32bpp modes.
+The flexible nature of the interface also allows you to set any arbitrary
+dimensions you want. You are not limited to 640x480 or 1024x768 in any way.
+
+To use this driver with X Windows, modify your X configuration file to load
+the fbdev driver. If your X configuration relies on auto-detection you still
+need to add an explicit reference to the "fbdev" driver. X does not consider
+fbdev when auto-detecting the card.
+
+4. VirtualBox screen refresh ioctl()
+------------------------------------
+
+If you are developing code to draw on bochsfb's secondary monitors you will
+first need to identify this driver. Use strncmp() to match "Bochs VBE" or
+"Bochs VBE/" in the framebuffer's name field.
+
+These procedures are not needed for the primary VGA display in VirtualBox.
+
+After drawing on the screen, you will need to issue an ioctl() to trigger a
+screen update so that VirtualBox knows it needs to redraw the screen. There
+are two ioctls to accomplish this: one to refresh the entire screen, the
+other to refresh a specific rectangular portion of the screen.
+
+struct bochsfb_rect {
+	uint16_t	x,y,w,h;
+};
+
+#define BOCHSFB_FLUSH		_IO('B',1)
+#define BOCHSFB_FLUSH_RECT	_IOW('B',2, struct bochsfb_rect)
+
+--
+ Jonathan Campbell <jonathan@castus.tv>
+ Last updated: 2013-08-19
+
