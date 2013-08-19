@@ -203,7 +203,6 @@ struct bochs_fb_info {
 };
 
 static unsigned char		vbox_hgsmi = 0,vbox_video = 0;
-static unsigned char		got_apert_region = 0;
 static struct pci_dev*		pci_vga_dev = NULL;
 static resource_size_t		apert_base;
 static unsigned int		apert_mapped;
@@ -464,32 +463,16 @@ static void vbox_hgsmi_set_mode(unsigned int i,VBVAINFOSCREEN *si) {
 	}
 }
 
-static void bochs_unmap_resources(void) {
+static void bochs_unmap_aperture(void) {
 	if (aperture_stolen != NULL) {
 		iounmap(aperture_stolen);
 		aperture_stolen = NULL;
-		/* assumption: we wouldn't have ioremap()'d the aperture
-		 * if we were not able to claim it */
-		if (got_apert_region) release_mem_region(apert_base,apert_mapped);
-		got_apert_region = 0;
 	}
 }
 
-static int bochs_map_resources(void) {
-	if (!request_mem_region(apert_base,apert_mapped,"bochs VBE aperture")) {
-		printk(KERN_ERR "bochsfb: cannot claim aperture %llx-%llx\n",
-			apert_base,apert_base+apert_mapped-1LL);
-		bochs_unmap_resources();
+static int bochs_map_aperture(void) {
+	if ((aperture_stolen=ioremap(apert_base,apert_mapped)) == NULL)
 		return 1;
-	}
-	got_apert_region = 1;
-
-	/* don't ask for the entire aperture, it might be too large for ioremap()
-	 * to handle and there's not that much stolen memory anyhow */
-	if ((aperture_stolen = ioremap(apert_base,apert_mapped)) == NULL) {
-		bochs_unmap_resources();
-		return 1;
-	}
 
 	return 0;
 }
@@ -721,6 +704,14 @@ static int bochs_ioctl(struct fb_info *info, unsigned int cmd, unsigned long arg
 
 	return err;
 }
+
+void bochs_destroy(struct fb_info *fb) {
+	struct bochs_fb_info *par = fb->par;
+
+	printk(KERN_INFO "bochsfb destroy\n");
+
+	if (fb->screen_size != 0) release_mem_region(apert_base+par->base,fb->screen_size);
+}
 				
 static struct fb_ops bochs_ops = {
 	.owner =		THIS_MODULE,
@@ -730,7 +721,8 @@ static struct fb_ops bochs_ops = {
 	.fb_copyarea =		cfb_copyarea,
 	.fb_imageblit =		cfb_imageblit,
 	.fb_check_var =		bochs_check_var,
-	.fb_set_par =		bochs_set_par
+	.fb_set_par =		bochs_set_par,
+	.fb_destroy =		bochs_destroy
 };
 
 static void fill_fb_default_mode(struct fb_info *fb,const int index) {
@@ -798,7 +790,6 @@ static int bochs_register_fb(unsigned int monitor,unsigned long base,unsigned lo
 	pf->hgsmi_page = NULL;
 	BUG_ON(pf == NULL);
 	f->pseudo_palette = pf->pseudo_palette;
-/*	pci_set_drvdata(pci_vga_dev,f); */
 	f->flags = FBINFO_DEFAULT | FBINFO_HWACCEL_DISABLED;
 	f->fbops = &bochs_ops;
 	f->screen_base = aperture_stolen+base;
@@ -810,6 +801,13 @@ static int bochs_register_fb(unsigned int monitor,unsigned long base,unsigned lo
 
 	fill_fb_default_mode(f,i);
 
+	if ((f->apertures=alloc_apertures(1)) == NULL) {
+		printk(KERN_ERR "Cannot alloc aperture\n");
+		goto err_out;
+	}
+	f->apertures->ranges[0].base = apert_base+pf->base;
+	f->apertures->ranges[0].size = f->screen_size;
+
 	if (fb_alloc_cmap(&f->cmap,256,0) < 0) {
 		printk(KERN_ERR "Cannot alloc cmap for framebuffer\n");
 		goto err_out;
@@ -817,6 +815,13 @@ static int bochs_register_fb(unsigned int monitor,unsigned long base,unsigned lo
 
 	if (register_framebuffer(f)) {
 		printk(KERN_ERR "Cannot register framebuffer\n");
+		goto err_out;
+	}
+
+	if (request_mem_region(apert_base+pf->base,f->screen_size,"Bochs VBE framebuffer") == NULL) {
+		printk(KERN_ERR "request_mem_region failed\n");
+		f->screen_size = 0; /* don't let fb_destruct call release_mem_region */
+		unregister_framebuffer(f);
 		goto err_out;
 	}
 
@@ -832,7 +837,7 @@ err_out:if (f != NULL) framebuffer_release(f);
 }
 
 static void bochs_free_dev(void) {
-	bochs_unmap_resources();
+	bochs_unmap_aperture();
 	if (pci_vga_dev) {
 		pci_dev_put(pci_vga_dev);
 		pci_vga_dev = NULL;
@@ -863,11 +868,6 @@ static struct pci_dev *bochs_find_device(void) {
 				pci_dev_put(dev);
 			}
 		}
-	}
-
-	if (pci_vga_dev == NULL) {
-		bochs_free_dev();
-		return NULL;
 	}
 
 	return pci_vga_dev;
@@ -993,8 +993,10 @@ static int __init bochs_detect_ioports(void) {
 static int __init bochs_init(void)
 {
 	memset(bochs_fb,0,sizeof(bochs_fb));
-	if ((pci_vga_dev = bochs_find_device()) == NULL)
+	if ((pci_vga_dev=bochs_find_device()) == NULL) {
+		bochs_free_dev();
 		return -ENODEV;
+	}
 
 	if (bochs_detect_ioports()) {
 		bochs_free_dev();
@@ -1012,26 +1014,20 @@ static int __init bochs_init(void)
 		return -ENODEV;
 	}
 
-	if (bochs_map_resources()) {
+	/* ioremap the range. fail if we cannot ioremap(). we don't
+	 * care at this point if request_mem_region() failed. */
+	if (bochs_map_aperture()) {
 		printk(KERN_ERR "bochsfb: cannot map resources\n");
 		bochs_free_dev();
 		return -ENODEV;
 	}
-
-#ifdef CONFIG_MTRR
-	/* help performance by covering the aperture with
-	 * a write-combining MTRR. it might already be there,
-	 * so the function may fail. if it does, video ram access
-	 * is slightly slower, who cares? */
-	mtrr_add(apert_base,apert_mapped,MTRR_TYPE_WRCOMB,1);
-#endif
 
 	/* VirtualBox has extensions of it's own that enable multiple monitors
 	 * and a memory-based command/response system */
 	if (vbox_extensions) {
 		if (vbox_hgsmi) {
 			if (check_hgsmi()) {
-				printk(KERN_WARNING "bochsfb: HGSMI functionality disabled\n");
+				printk(KERN_INFO "bochsfb: HGSMI functionality disabled\n");
 				vbox_hgsmi = 0;
 			}
 		}
@@ -1039,7 +1035,7 @@ static int __init bochs_init(void)
 
 	/* register and alloc a framebuffer for each */
 	if (monitors == 1) {
-		printk(KERN_ERR "bochsfb: setting up single-monitor setup\n");
+		printk(KERN_INFO "bochsfb: setting up single-monitor setup\n");
 		if (bochs_register_fb(0,0,apert_usable)) {
 			printk(KERN_ERR "Problem registering framebuffers\n");
 			bochs_free_dev();
@@ -1056,7 +1052,7 @@ static int __init bochs_init(void)
 		if (vbox_hgsmi && per_fb_alloc >= 0x2000) per_fb_alloc -= 0x1000;
 #endif
 
-		printk(KERN_ERR "bochsfb: setting up %u-head output (%lu bytes/monitor)\n",monitors,per_fb_size);
+		printk(KERN_INFO "bochsfb: setting up %u-head output (%lu bytes/monitor)\n",monitors,per_fb_size);
 		for (i=0;i < monitors;i++) {
 			if (bochs_register_fb(i,i*per_fb_size,per_fb_alloc)) {
 				printk(KERN_ERR "Problem registering framebuffer %d\n",i);
